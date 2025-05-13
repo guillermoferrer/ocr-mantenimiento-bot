@@ -1,0 +1,6 @@
+Flask
+requests
+pytesseract
+Pillow
+gspread
+oauth2client
