@@ -12,7 +12,11 @@ app = Flask(__name__)
 
 # Configuración de Google Sheets
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+import json
+from io import StringIO
+
+creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_key("14yj5AFl6gdUs7bL2OKc6GLIhho-XDoJrHZ-eNCgAevs").worksheet("Historial")
 
