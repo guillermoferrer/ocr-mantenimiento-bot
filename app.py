@@ -11,31 +11,28 @@ from datetime import datetime
 # Iniciar Flask
 app = Flask(__name__)
 
-# Configurar token de Telegram
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Token del bot desde variables de entorno
+TOKEN = os.environ.get("TOKEN")
 bot = telegram.Bot(token=TOKEN)
 
-# Leer credenciales desde variable de entorno
+# Cargar credenciales desde GOOGLE_CREDS
 google_creds_json = os.environ.get("GOOGLE_CREDS")
 info = json.loads(google_creds_json)
 
-# Configurar cliente Vision
-credentials = service_account.Credentials.from_service_account_info(info, scopes=[
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-])
+# Crear un único objeto de credenciales para todo
+credentials = service_account.Credentials.from_service_account_info(info)
+
+# Cliente Vision
 vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
-# Configurar cliente Sheets
+# Cliente Sheets
 gc = gspread.authorize(credentials)
 sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
-# Ruta de prueba
 @app.route('/', methods=['GET'])
 def index():
-    return '✅ OCR activo y funcionando.'
+    return '✅ OCR activo y escuchando.'
 
-# Ruta Webhook
 @app.route('/', methods=['POST'])
 def webhook():
     try:
@@ -49,12 +46,9 @@ def webhook():
             new_file.download(out=file_bytes)
             content = file_bytes.getvalue()
 
-            # OCR con Google Vision
+            # OCR con Vision
             image = vision.Image(content=content)
-            response = vision_client.document_text_detection(
-                image=image,
-                image_context={"language_hints": ["es"]}
-            )
+            response = vision_client.document_text_detection(image=image)
 
             if response.error.message:
                 bot.send_message(chat_id=update.message.chat_id,
@@ -64,36 +58,34 @@ def webhook():
             texto = response.full_text_annotation.text
             tareas = []
 
-            # Detectar líneas con SÍ / NO
+            # Detectar líneas con "sí", "si", "no"
             for linea in texto.split("\n"):
-                if any(palabra in linea.lower() for palabra in ["sí", "si", "no"]):
+                if any(p in linea.lower() for p in ["sí", "si", "no"]):
                     tareas.append(linea)
 
-            # Registrar tareas
-            tareas_registradas = 0
             fecha = update.message.date.strftime('%d/%m/%Y')
+            tareas_registradas = 0
 
-            for linea in tareas:
-                datos = linea.split()
+            for t in tareas:
+                datos = t.split()
                 if len(datos) >= 6:
                     equipo = datos[1]
                     tarea = " ".join(datos[2:-3])
                     frecuencia = datos[-3]
                     realizado = datos[-2].upper()
                     puntuacion = datos[-1]
-
-                    if realizado in ["SÍ", "SI", "NO"]:
-                        sheet.append_row([
-                            fecha, equipo, tarea, frecuencia,
-                            realizado.replace("Í", "I"), puntuacion
-                        ])
-                        tareas_registradas += 1
+                    sheet.append_row([fecha, equipo, tarea, frecuencia, realizado, puntuacion])
+                    tareas_registradas += 1
 
             bot.send_message(chat_id=update.message.chat_id,
                              text=f"✅ Procesado con éxito.\nTareas registradas: {tareas_registradas}")
+
         return "OK", 200
 
     except Exception as e:
-        bot.send_message(chat_id=update.message.chat_id,
-                         text=f"❌ Error procesando: {str(e)}")
+        try:
+            bot.send_message(chat_id=update.message.chat_id,
+                             text=f"❌ Error procesando: {str(e)}")
+        except:
+            pass  # Evita bucles si falla el envío del mensaje
         return "Error", 500
