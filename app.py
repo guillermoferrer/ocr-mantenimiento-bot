@@ -1,69 +1,101 @@
 import os
 import io
+import json
 from flask import Flask, request
 import telegram
-import pytesseract
-from PIL import Image
+from google.cloud import vision
+from google.oauth2 import service_account
 import gspread
 from google.oauth2.service_account import Credentials
-import json
-import re
 from datetime import datetime
 
 app = Flask(__name__)
-TOKEN = os.environ['TELEGRAM_TOKEN']
+
+# --- TELEGRAM ---
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 bot = telegram.Bot(token=TOKEN)
 
-# Configurar credenciales Google
+# --- GOOGLE VISION ---
 google_creds_json = os.environ.get("GOOGLE_CREDS")
 info = json.loads(google_creds_json)
-creds = Credentials.from_service_account_info(info, scopes=[
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-])
-gc = gspread.authorize(creds)
+credentials = service_account.Credentials.from_service_account_info(info)
+vision_client = vision.ImageAnnotatorClient(credentials=credentials)
+
+# --- GOOGLE SHEETS ---
+SCOPES = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+gc = gspread.authorize(Credentials.from_service_account_info(info, scopes=SCOPES))
 sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
-@app.route('/', methods=['GET'])
-def home():
-    return "OCR activo."
 
-@app.route('/', methods=['POST'])
+# --- FILTRADO INTELIGENTE DE TAREAS ---
+def extraer_tareas(texto):
+    tareas = []
+    for linea in texto.split("\n"):
+        linea_limpia = linea.strip().lower()
+        if ("sí" in linea_limpia or "no" in linea_limpia) and any(char.isdigit() for char in linea_limpia):
+            tareas.append(linea)
+    return tareas
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "OCR activo y esperando tareas."
+
+
+@app.route("/", methods=["POST"])
 def webhook():
     try:
         update = telegram.Update.de_json(request.get_json(force=True), bot)
 
         if update.message and update.message.photo:
             file_id = update.message.photo[-1].file_id
-            photo = bot.get_file(file_id)
+            new_file = bot.get_file(file_id)
             file_bytes = io.BytesIO()
-            photo.download(out=file_bytes)
-            file_bytes.seek(0)
-            image = Image.open(file_bytes)
+            new_file.download(out=file_bytes)
+            content = file_bytes.getvalue()
 
-            # OCR con pytesseract (español)
-            texto = pytesseract.image_to_string(image, lang='spa')
+            # OCR con hint en español
+            image = vision.Image(content=content)
+            response = vision_client.document_text_detection(
+                image=image,
+                image_context={"language_hints": ["es"]}
+            )
 
-            tareas_detectadas = []
-            for linea in texto.split("\n"):
-                if re.search(r'\b(SI|NO)\b', linea.upper()) and re.search(r'\b\d{1,2}\b', linea):
-                    tareas_detectadas.append(linea)
+            if response.error.message:
+                bot.send_message(chat_id=update.message.chat.id, text="❌ Error OCR: " + response.error.message)
+                return "Error OCR", 500
 
-            for t in tareas_detectadas:
+            texto = response.full_text_annotation.text
+            tareas = extraer_tareas(texto)
+
+            if not tareas:
+                bot.send_message(chat_id=update.message.chat.id, text="🧐 No se detectaron tareas. Revisa la calidad de la imagen.")
+                return "Sin tareas", 200
+
+            tareas_registradas = 0
+            for t in tareas:
                 datos = t.split()
-                if len(datos) >= 6:
-                    fecha = update.message.date.strftime('%d/%m/%Y')
-                    equipo = " ".join(datos[1:3])
-                    tarea = " ".join(datos[3:-3])
-                    frecuencia = datos[-3]
-                    realizado = datos[-2].upper()
-                    puntuacion = datos[-1]
-                    sheet.append_row([fecha, equipo, tarea, frecuencia, realizado, puntuacion])
+                if len(datos) >= 5:
+                    try:
+                        fecha = datetime.now().strftime('%d/%m/%Y')
+                        equipo = datos[0]
+                        tarea = " ".join(datos[1:-3])
+                        frecuencia = datos[-3]
+                        realizado = datos[-2]
+                        puntuacion = datos[-1]
+                        sheet.append_row([fecha, equipo, tarea, frecuencia, realizado, puntuacion])
+                        tareas_registradas += 1
+                    except Exception as e:
+                        continue  # saltamos errores de fila mal formada
 
-            bot.send_message(chat_id=update.message.chat.id,
-                             text=f"✅ Procesado con éxito.\nTareas registradas: {len(tareas_detectadas)}")
-        return "OK"
+            bot.send_message(
+                chat_id=update.message.chat.id,
+                text=f"✅ Procesado con éxito.\nTareas registradas: {tareas_registradas}"
+            )
+
+        return "OK", 200
+
     except Exception as e:
-        bot.send_message(chat_id=update.message.chat.id, text="❌ Error: " + str(e))
+        print("Error general:", e)
+        bot.send_message(chat_id=update.message.chat.id, text="❌ Error general: " + str(e))
         return "Error", 500
-
