@@ -1,30 +1,27 @@
 import os
 import io
-import json
 from flask import Flask, request
 import telegram
-from google.cloud import vision
-from google.oauth2 import service_account
+import pytesseract
+from PIL import Image
 import gspread
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.service_account import Credentials
+import json
+import re
+from datetime import datetime
 
 app = Flask(__name__)
-
-# Telegram
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TOKEN = os.environ['TELEGRAM_TOKEN']
 bot = telegram.Bot(token=TOKEN)
 
-# Google Vision API
+# Configurar credenciales Google
 google_creds_json = os.environ.get("GOOGLE_CREDS")
 info = json.loads(google_creds_json)
-credentials = service_account.Credentials.from_service_account_info(info)
-vision_client = vision.ImageAnnotatorClient(credentials=credentials)
-
-# Google Sheets
-scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-gc = gspread.authorize(credentials.with_scopes(scope))
+creds = Credentials.from_service_account_info(info, scopes=[
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+])
+gc = gspread.authorize(creds)
 sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
 @app.route('/', methods=['GET'])
@@ -35,47 +32,38 @@ def home():
 def webhook():
     try:
         update = telegram.Update.de_json(request.get_json(force=True), bot)
+
         if update.message and update.message.photo:
             file_id = update.message.photo[-1].file_id
-            new_file = bot.get_file(file_id)
+            photo = bot.get_file(file_id)
             file_bytes = io.BytesIO()
-            new_file.download(out=file_bytes)
-            content = file_bytes.getvalue()
+            photo.download(out=file_bytes)
+            file_bytes.seek(0)
+            image = Image.open(file_bytes)
 
-            image = vision.Image(content=content)
-            response = vision_client.document_text_detection(
-                image=image,
-                image_context={"language_hints": ["es"]}
-            )
+            # OCR con pytesseract (español)
+            texto = pytesseract.image_to_string(image, lang='spa')
 
-            if response.error.message:
-                bot.send_message(chat_id=update.message.chat.id,
-                                 text="❌ Error OCR: " + response.error.message)
-                return "Error", 500
+            tareas_detectadas = []
+            for linea in texto.split("\n"):
+                if re.search(r'\b(SI|NO)\b', linea.upper()) and re.search(r'\b\d{1,2}\b', linea):
+                    tareas_detectadas.append(linea)
 
-            texto = response.full_text_annotation.text
-            lineas = texto.split('\n')
-
-            tareas = []
-            for linea in lineas:
-                if any(s in linea.lower() for s in ['sí', 'si', 'no']):
-                    partes = linea.split()
-                    if len(partes) >= 3 and partes[-2].lower() in ['sí', 'si', 'no']:
-                        puntuacion = partes[-1]
-                        realizado = partes[-2]
-                        frecuencia = partes[-3] if len(partes) > 3 else "No identificada"
-                        tarea = " ".join(partes[2:-3]) if len(partes) > 5 else "Tarea no clara"
-                        equipo = partes[1] if len(partes) > 1 else "Equipo desconocido"
-                        fecha = update.message.date.strftime('%d/%m/%Y')
-                        tareas.append([fecha, equipo, tarea, frecuencia, realizado.upper(), puntuacion])
-
-            for tarea in tareas:
-                sheet.append_row(tarea)
+            for t in tareas_detectadas:
+                datos = t.split()
+                if len(datos) >= 6:
+                    fecha = update.message.date.strftime('%d/%m/%Y')
+                    equipo = " ".join(datos[1:3])
+                    tarea = " ".join(datos[3:-3])
+                    frecuencia = datos[-3]
+                    realizado = datos[-2].upper()
+                    puntuacion = datos[-1]
+                    sheet.append_row([fecha, equipo, tarea, frecuencia, realizado, puntuacion])
 
             bot.send_message(chat_id=update.message.chat.id,
-                             text=f"✅ Procesado con éxito.\nTareas registradas: {len(tareas)}")
+                             text=f"✅ Procesado con éxito.\nTareas registradas: {len(tareas_detectadas)}")
         return "OK"
     except Exception as e:
-        bot.send_message(chat_id=update.message.chat.id,
-                         text="❌ Error procesando: " + str(e))
+        bot.send_message(chat_id=update.message.chat.id, text="❌ Error: " + str(e))
         return "Error", 500
+
