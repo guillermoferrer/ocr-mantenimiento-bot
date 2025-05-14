@@ -7,20 +7,22 @@ from io import BytesIO
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime
+import json
 
 app = Flask(__name__)
 
-# Configuración de Google Sheets
+# Leer credenciales de Google desde variable de entorno
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-import json
-from io import StringIO
-
 creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_key("14yj5AFl6gdUs7bL2OKc6GLIhho-XDoJrHZ-eNCgAevs").worksheet("Historial")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot activo ✅", 200
 
 def descargar_imagen(file_id):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
@@ -37,11 +39,9 @@ def webhook():
         photo = data["message"]["photo"][-1]
         file_id = photo["file_id"]
 
-        # Descargar imagen y aplicar OCR
         imagen = descargar_imagen(file_id)
         texto = pytesseract.image_to_string(imagen)
 
-        # Registrar en hoja
         hoy = datetime.today().strftime('%Y-%m-%d')
         for linea in texto.splitlines():
             if "-" in linea and ("sí" in linea.lower() or "no" in linea.lower()):
