@@ -6,3 +6,4 @@ gspread
 oauth2client
 gunicorn
 google-cloud-vision
+python-telegram-bot==13.15
