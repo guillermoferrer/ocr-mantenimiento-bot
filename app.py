@@ -14,7 +14,12 @@ TOKEN = '7351770793:AAGGoRdDZWEiqgB0-jMJPFrL7YVYdAXJ1bE'
 bot = telegram.Bot(token=TOKEN)
 
 # Google Vision
-credentials = service_account.Credentials.from_service_account_file('credentials.json')
+import json
+import os
+
+google_creds_json = os.environ.get("GOOGLE_CREDS")
+info = json.loads(google_creds_json)
+credentials = service_account.Credentials.from_service_account_info(info)
 vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
 # Google Sheets
