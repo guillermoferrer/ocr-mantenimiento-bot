@@ -14,15 +14,15 @@ app = Flask(__name__)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 bot = telegram.Bot(token=TOKEN)
 
-# Google Vision
+# Credenciales Google Vision desde variable de entorno
 google_creds_json = os.environ.get("GOOGLE_CREDS")
-vision_info = json.loads(google_creds_json)
-credentials = service_account.Credentials.from_service_account_info(vision_info)
+info = json.loads(google_creds_json)
+credentials = service_account.Credentials.from_service_account_info(info)
 vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
-# Google Sheets
+# Credenciales Google Sheets
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-sheet_creds = ServiceAccountCredentials.from_json_keyfile_dict(vision_info, scope)
+sheet_creds = ServiceAccountCredentials.from_json_keyfile_dict(info, scope)
 gc = gspread.authorize(sheet_creds)
 sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
@@ -34,7 +34,6 @@ def home():
 def webhook():
     try:
         update = telegram.Update.de_json(request.get_json(force=True), bot)
-
         if update.message and update.message.photo:
             file_id = update.message.photo[-1].file_id
             new_file = bot.get_file(file_id)
@@ -42,27 +41,20 @@ def webhook():
             new_file.download(out=file_bytes)
             content = file_bytes.getvalue()
 
-            # Enviar imagen a Google Vision
+            # OCR con idioma español
             image = vision.Image(content=content)
-            response = vision_client.document_text_detection(
-                image=image,
-                image_context={"language_hints": ["es"]}
-            )
+            response = vision_client.document_text_detection(image=image, image_context={"language_hints": ["es"]})
 
             if response.error.message:
-                bot.send_message(chat_id=update.message.chat_id,
-                                 text="❌ Error OCR: " + response.error.message)
+                bot.send_message(chat_id=update.message.chat_id, text="❌ Error OCR: " + response.error.message)
                 return "Error", 500
 
             texto = response.full_text_annotation.text
-
-            # Procesar líneas con tareas
             tareas = []
             for linea in texto.split("\n"):
-                if any(palabra in linea.lower() for palabra in ["sí", "no"]):
+                if any(palabra in linea.lower() for palabra in ["sí", "si", "no", "sì", "Sí", "Si", "No"]):
                     tareas.append(linea)
 
-            # Registrar en Google Sheets
             tareas_registradas = 0
             for t in tareas:
                 datos = t.split()
