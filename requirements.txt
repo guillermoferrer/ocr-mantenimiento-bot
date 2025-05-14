@@ -5,3 +5,4 @@ Pillow
 gspread
 oauth2client
 gunicorn
+google-cloud-vision
