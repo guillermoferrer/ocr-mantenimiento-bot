@@ -3,7 +3,7 @@ import io
 import json
 from flask import Flask, request
 import telegram
-from google.cloud import vision
+import google.cloud.vision_v1 as vision
 from google.oauth2 import service_account
 import gspread
 from google.oauth2.service_account import Credentials
