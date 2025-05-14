@@ -8,18 +8,19 @@ from google.oauth2 import service_account
 import gspread
 from datetime import datetime
 
-# Iniciar Flask
 app = Flask(__name__)
 
-# Token del bot desde variables de entorno
+# Telegram token desde variables de entorno
 TOKEN = os.environ.get("TOKEN")
+if not TOKEN:
+    raise ValueError("❌ TOKEN no está definido en las variables de entorno")
 bot = telegram.Bot(token=TOKEN)
 
-# Cargar credenciales desde GOOGLE_CREDS
+# Credenciales de Google desde GOOGLE_CREDS
 google_creds_json = os.environ.get("GOOGLE_CREDS")
+if not google_creds_json:
+    raise ValueError("❌ GOOGLE_CREDS no está definido en las variables de entorno")
 info = json.loads(google_creds_json)
-
-# Crear un único objeto de credenciales para todo
 credentials = service_account.Credentials.from_service_account_info(info)
 
 # Cliente Vision
@@ -29,11 +30,11 @@ vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 gc = gspread.authorize(credentials)
 sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
-@app.route('/', methods=['GET'])
+@app.route("/", methods=["GET"])
 def index():
-    return '✅ OCR activo y escuchando.'
+    return "✅ OCR activo y esperando imágenes"
 
-@app.route('/', methods=['POST'])
+@app.route("/", methods=["POST"])
 def webhook():
     try:
         update = telegram.Update.de_json(request.get_json(force=True), bot)
@@ -41,12 +42,10 @@ def webhook():
         if update.message and update.message.photo:
             file_id = update.message.photo[-1].file_id
             new_file = bot.get_file(file_id)
-
             file_bytes = io.BytesIO()
             new_file.download(out=file_bytes)
             content = file_bytes.getvalue()
 
-            # OCR con Vision
             image = vision.Image(content=content)
             response = vision_client.document_text_detection(image=image)
 
@@ -58,9 +57,8 @@ def webhook():
             texto = response.full_text_annotation.text
             tareas = []
 
-            # Detectar líneas con "sí", "si", "no"
             for linea in texto.split("\n"):
-                if any(p in linea.lower() for p in ["sí", "si", "no"]):
+                if any(palabra in linea.lower() for palabra in ["sí", "si", "no"]):
                     tareas.append(linea)
 
             fecha = update.message.date.strftime('%d/%m/%Y')
@@ -84,8 +82,9 @@ def webhook():
 
     except Exception as e:
         try:
-            bot.send_message(chat_id=update.message.chat_id,
-                             text=f"❌ Error procesando: {str(e)}")
+            chat_id = update.message.chat_id if update.message else None
+            if chat_id:
+                bot.send_message(chat_id=chat_id, text=f"❌ Error procesando: {str(e)}")
         except:
-            pass  # Evita bucles si falla el envío del mensaje
+            pass
         return "Error", 500
