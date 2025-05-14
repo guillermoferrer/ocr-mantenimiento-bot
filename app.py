@@ -1,65 +1,75 @@
-from flask import Flask, request
-import requests
 import os
-import json
+import io
+from flask import Flask, request
+import telegram
+from google.cloud import vision
+from google.oauth2 import service_account
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
-from google.oauth2 import service_account
-from google.cloud import vision
 
 app = Flask(__name__)
 
-# Autenticación con Google Sheets
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds_dict = json.loads(os.environ["GOOGLE_CREDS"])
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_key("14yj5AFl6gdUs7bL2OKc6GLIhho-XDoJrHZ-eNCgAevs").worksheet("Historial")
+# Telegram
+TOKEN = '7351770793:AAGGoRdDZWEiqgB0-jMJPFrL7YVYdAXJ1bE'
+bot = telegram.Bot(token=TOKEN)
 
-# Cliente Vision API
-vision_creds = service_account.Credentials.from_service_account_info(creds_dict)
-vision_client = vision.ImageAnnotatorClient(credentials=vision_creds)
+# Google Vision
+credentials = service_account.Credentials.from_service_account_file('credentials.json')
+vision_client = vision.ImageAnnotatorClient(credentials=credentials)
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Google Sheets
+scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+sheet_creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+gc = gspread.authorize(sheet_creds)
+sheet = gc.open("Listado Mantenimiento Semanal").worksheet("Historial")
 
-@app.route("/", methods=["GET"])
+@app.route('/', methods=['GET'])
 def home():
-    return "Bot activo y escuchando ✅", 200
+    return "OCR activo."
 
-def descargar_imagen(file_id):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
-    file_path = requests.get(url).json()["result"]["file_path"]
-    file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-    return requests.get(file_url).content
-
-@app.route("/", methods=["POST"])
+@app.route('/', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    if "message" in data and "photo" in data["message"]:
-        chat_id = data["message"]["chat"]["id"]
-        photo = data["message"]["photo"][-1]
-        file_id = photo["file_id"]
-        imagen_bytes = descargar_imagen(file_id)
+    try:
+        update = telegram.Update.de_json(request.get_json(force=True), bot)
+        if update.message and update.message.photo:
+            file_id = update.message.photo[-1].file_id
+            new_file = bot.get_file(file_id)
+            file_bytes = io.BytesIO()
+            new_file.download(out=file_bytes)
+            content = file_bytes.getvalue()
 
-        image = vision.Image(content=imagen_bytes)
-        response = vision_client.text_detection(image=image)
-        texto = response.text_annotations[0].description if response.text_annotations else ""
+            # Enviar a Google Vision
+            image = vision.Image(content=content)
+            response = vision_client.document_text_detection(image=image, image_context={"language_hints": ["es"]})
 
-        hoy = datetime.today().strftime('%Y-%m-%d')
-        tareas_registradas = 0
+            if response.error.message:
+                bot.send_message(chat_id=update.message.chat_id, text="❌ Error OCR: " + response.error.message)
+                return "Error", 500
 
-        for linea in texto.splitlines():
-            partes = linea.lower().split()
-            if any(palabra in partes for palabra in ["sí", "no"]):
-                if len(partes) >= 5:
-                    equipo = partes[1] if len(partes) > 1 else "Desconocido"
-                    tarea = partes[2] if len(partes) > 2 else "Sin nombre"
-                    realizado = "Sí" if "sí" in partes else "No"
-                    sheet.append_row([hoy, equipo.capitalize(), tarea.capitalize(), "OCR", realizado])
-                    tareas_registradas += 1
+            texto = response.full_text_annotation.text
 
-        mensaje = f"✅ Procesado con éxito.\nTareas registradas: {tareas_registradas}"
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": chat_id, "text": mensaje})
-    return "OK", 200
+            # Procesar líneas de texto que contengan tareas
+            tareas = []
+            for linea in texto.split("\n"):
+                if any(palabra in linea.lower() for palabra in ["sí", "no"]):
+                    tareas.append(linea)
+
+            # Registrar en hoja
+            for t in tareas:
+                datos = t.split()
+                if len(datos) >= 6:
+                    fecha = update.message.date.strftime('%d/%m/%Y')
+                    equipo = datos[1]
+                    tarea = " ".join(datos[2:-3])
+                    frecuencia = datos[-3]
+                    realizado = datos[-2]
+                    puntuacion = datos[-1]
+                    sheet.append_row([fecha, equipo, tarea, frecuencia, realizado, puntuacion])
+
+            bot.send_message(chat_id=update.message.chat_id,
+                             text=f"✅ Procesado con éxito.\nTareas registradas: {len(tareas)}")
+        return "OK"
+    except Exception as e:
+        bot.send_message(chat_id=update.message.chat_id,
+                         text="❌ Error procesando: " + str(e))
+        return "Error", 500
